@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "indian-stock-trading-env"
+version = "1.0.0"
+description = "OpenEnv RL environment for Indian NSE/BSE stock trading"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "openenv-core>=0.1.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "pydantic>=2.0.0",
+    "yfinance>=0.2.38",
+    "pandas>=2.0.0",
+    "numpy>=1.26.0",
+    "openai>=1.0.0",
+    "pytz>=2024.1",
+    "requests>=2.31.0",
+    "websockets>=12.0",
+    "httpx>=0.27.0",
+]
+
+[project.scripts]
+server = "server.app:main"
+
+[tool.setuptools.packages.find]
+where = ["."]

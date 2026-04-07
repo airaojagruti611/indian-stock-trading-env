@@ -1,0 +1,72 @@
+name: indian-stock-trading-env
+version: "1.0.0"
+description: >
+  AI agent trades real NSE/BSE Indian stocks using historical market data.
+  Three tasks covering bull market, election volatility, and bear market
+  with full SEBI compliance rules. Uses real price data via yfinance.
+
+author: airaojagruti
+license: MIT
+
+tags:
+  - openenv
+  - finance
+  - trading
+  - india
+  - nse
+  - bse
+  - real-world
+  - stocks
+  - portfolio
+  - reinforcement-learning
+
+tasks:
+  - id: easy
+    name: "Nifty Bull Run — January 2024"
+    description: >
+      Trade RELIANCE and TCS during the January 2024 bull run.
+      5 trading days, ₹1 Lakh starting capital.
+      Score based on profit vs optimal buy-and-hold return.
+    difficulty: easy
+    max_steps: 5
+    starting_capital: 100000
+    stocks: ["RELIANCE", "TCS"]
+
+  - id: medium
+    name: "Election Volatility — May-June 2024"
+    description: >
+      Navigate extreme volatility during India's 2024 general elections.
+      Markets crashed 8% on June 4 when results shocked expectations.
+      20 trading days, ₹5 Lakhs, 3 stocks, basic SEBI rules apply.
+    difficulty: medium
+    max_steps: 20
+    starting_capital: 500000
+    stocks: ["RELIANCE", "HDFCBANK", "ZOMATO"]
+
+  - id: hard
+    name: "Bear Market + SEBI Compliance — 2022"
+    description: >
+      Survive the brutal 2022 bear market (Russia-Ukraine war, Fed hikes,
+      FII selloff). 30 trading days, ₹10 Lakhs, 5 stocks.
+      Full SEBI rules: max 40% concentration, mandatory stop-loss at -10%,
+      20% minimum cash reserve, T+2 settlement.
+    difficulty: hard
+    max_steps: 30
+    starting_capital: 1000000
+    stocks: ["RELIANCE", "TCS", "INFY", "ONGC", "TATASTEEL"]
+
+environment:
+  data_source: yfinance
+  market: NSE
+  currency: INR
+  includes_trading_costs: true
+  sebi_rules: true
+  t2_settlement: true  # hard task only
+
+server:
+  framework: fastapi
+  transport: websocket
+  port: 8000
+  entry_point: server.app:main
+
+hub_id: airaojagruti/indian-stock-trading-env
