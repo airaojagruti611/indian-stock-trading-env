@@ -5,7 +5,7 @@ description: >
   Three tasks covering bull market, election volatility, and bear market
   with full SEBI compliance rules. Uses real price data via yfinance.
 
-author: airaojagruti
+author: jagruti611
 license: MIT
 
 tags:
@@ -69,4 +69,4 @@ server:
   port: 8000
   entry_point: server.app:main
 
-hub_id: airaojagruti/indian-stock-trading-env
+hub_id: jagruti611/indian-stock-trading-env

@@ -34,7 +34,7 @@ API_KEY      = os.environ.get("HF_TOKEN",     "placeholder")
 
 SPACE_URL    = os.environ.get(
     "SPACE_URL",
-    "https://airaojagruti-indian-stock-trading-env.hf.space"
+    "https://jagruti611-indian-stock-trading-env.hf.space"
 )
 
 TEMPERATURE  = 0.1

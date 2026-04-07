@@ -1,3 +1,19 @@
+---
+title: Indian Stock Trading Environment
+emoji: 📈
+colorFrom: green
+colorTo: blue
+sdk: docker
+app_port: 8000
+tags:
+  - openenv
+  - finance
+  - trading
+  - reinforcement-learning
+license: mit
+pinned: false
+---
+
 # 🇮🇳 Indian Stock Trading Environment
 
 An OpenEnv RL environment where AI agents trade real NSE/BSE Indian stocks
