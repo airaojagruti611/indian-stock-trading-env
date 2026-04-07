@@ -156,18 +156,19 @@ Run the baseline inference script:
 ```bash
 export API_BASE_URL=https://api.openai.com/v1
 export MODEL_NAME=gpt-4o-mini
-export HF_TOKEN=your_key_here
-export SPACE_URL=https://YOUR_USERNAME-indian-stock-trading-env.hf.space
+export HF_TOKEN=your_openai_key_here
+export SPACE_URL=https://jagruti611-indian-stock-trading-env.hf.space
 python inference.py
 ```
 
-Expected baseline scores (GPT-4o-mini):
+Baseline scores (GPT-4o-mini on live HF Space):
 
-| Task | Score | Notes |
-|------|-------|-------|
-| Easy | ~0.55 | Buys both stocks, decent profit |
-| Medium | ~0.40 | Struggles with election crash |
-| Hard | ~0.30 | Violates some SEBI rules |
+| Task | Score | Result | Notes |
+|------|-------|--------|-------|
+| Easy | 1.0000 | PASS | Agent bought RELIANCE optimally in Jan 2024 bull run |
+| Medium | 0.2102 | — | Traded only RELIANCE, missed diversification across election volatility |
+| Hard | 0.8065 | PASS | Strong risk management through 2022 bear market |
+| **Average** | **0.6722** | | |
 
 ---
 
