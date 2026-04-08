@@ -5,10 +5,20 @@ Wires the environment factory with action/observation types for OpenEnv's HTTP A
 /ws, /reset, /step, /state, /health, /docs
 """
 
-from openenv.core.env_server import create_fastapi_app
-from models import IndianTradingAction, MarketObservation
+import os
+import sys
 
-from .environment import IndianStockEnvironment
+from openenv.core.env_server import create_fastapi_app
+try:
+    from models import IndianTradingAction, MarketObservation
+except ImportError:
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from models import IndianTradingAction, MarketObservation
+
+try:
+    from .environment import IndianStockEnvironment
+except ImportError:
+    from environment import IndianStockEnvironment
 
 app = create_fastapi_app(
     IndianStockEnvironment,

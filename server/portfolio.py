@@ -82,6 +82,7 @@ class Portfolio:
 
         self.trade_history:    List[Trade]  = []
         self.daily_values:     List[float]  = []
+        self._active_violation_keys: set = set()
 
         self.total_brokerage:  float = 0.0
         self.total_stt:        float = 0.0
@@ -218,13 +219,50 @@ class Portfolio:
     # Portfolio value & metrics
     # -----------------------------------------------------------------------
 
+    def _pending_quantity(self, symbol: str) -> int:
+        return sum(qty for _, qty, _ in self.pending_t2.get(symbol, []))
+
+    def _pending_market_value(self, current_prices: Dict[str, float]) -> float:
+        value = 0.0
+        for sym, pending_lots in self.pending_t2.items():
+            px = current_prices.get(sym)
+            for _, qty, avg_price in pending_lots:
+                ref_price = px if px is not None else avg_price
+                value += qty * ref_price
+        return value
+
+    def holdings_market_value(self, current_prices: Dict[str, float]) -> Dict[str, float]:
+        """
+        Market value per symbol including both settled and pending T+2 lots.
+        This gives the true economic exposure used by scoring/compliance.
+        """
+        values: Dict[str, float] = {}
+
+        for sym, pos in self.positions.items():
+            values[sym] = values.get(sym, 0.0) + (
+                pos.quantity * current_prices.get(sym, pos.avg_price)
+            )
+
+        for sym, pending_lots in self.pending_t2.items():
+            px = current_prices.get(sym)
+            for _, qty, avg_price in pending_lots:
+                ref_price = px if px is not None else avg_price
+                values[sym] = values.get(sym, 0.0) + (qty * ref_price)
+
+        return {sym: round(val, 2) for sym, val in values.items() if val > 0}
+
+    def record_daily_value(self, portfolio_value: float):
+        """Append one mark-to-market value for drawdown/Sharpe metrics."""
+        self.daily_values.append(round(portfolio_value, 2))
+
     def total_value(self, current_prices: Dict[str, float]) -> float:
-        """Total portfolio value = cash + market value of holdings."""
+        """Total value = cash + settled holdings + pending T+2 holdings."""
         holdings_value = sum(
             pos.quantity * current_prices.get(sym, pos.avg_price)
             for sym, pos in self.positions.items()
         )
-        return round(self.cash + holdings_value, 2)
+        pending_value = self._pending_market_value(current_prices)
+        return round(self.cash + holdings_value + pending_value, 2)
 
     def unrealized_pnl(self, current_prices: Dict[str, float]) -> Dict[str, float]:
         """Unrealized P&L per position."""
@@ -245,8 +283,8 @@ class Portfolio:
         if total == 0:
             return {}
         conc = {}
-        for sym, pos in self.positions.items():
-            mkt_val = pos.quantity * current_prices.get(sym, pos.avg_price)
+        exposure_values = self.holdings_market_value(current_prices)
+        for sym, mkt_val in exposure_values.items():
             conc[sym] = round(mkt_val / total, 4)
         conc["CASH"] = round(self.cash / total, 4)
         return conc
@@ -271,11 +309,11 @@ class Portfolio:
 
     def winning_trades_count(self) -> int:
         sells = [t for t in self.trade_history if t.action == "sell"]
-        return sum(1 for t in sells if t.pnl and t.pnl > 0)
+        return sum(1 for t in sells if t.pnl is not None and t.pnl > 0)
 
     def losing_trades_count(self) -> int:
         sells = [t for t in self.trade_history if t.action == "sell"]
-        return sum(1 for t in sells if t.pnl and t.pnl <= 0)
+        return sum(1 for t in sells if t.pnl is not None and t.pnl <= 0)
 
     # -----------------------------------------------------------------------
     # T+2 settlement
@@ -309,12 +347,15 @@ class Portfolio:
         Returns list of violation messages.
         """
         violations = []
+        current_keys = set()
 
         max_pct = rules.get("max_single_stock_pct")
         if max_pct:
             conc = self.concentration(current_prices)
             for sym, pct in conc.items():
                 if sym != "CASH" and pct > max_pct:
+                    key = ("max_single_stock_pct", sym)
+                    current_keys.add(key)
                     violations.append(
                         f"SEBI violation: {sym} concentration {pct:.1%} "
                         f"exceeds limit of {max_pct:.1%}."
@@ -325,6 +366,8 @@ class Portfolio:
             total  = self.total_value(current_prices)
             c_pct  = self.cash / total if total > 0 else 1.0
             if c_pct < min_cash:
+                key = ("min_cash_reserve_pct",)
+                current_keys.add(key)
                 violations.append(
                     f"SEBI violation: Cash {c_pct:.1%} below "
                     f"minimum reserve of {min_cash:.1%}."
@@ -336,12 +379,17 @@ class Portfolio:
                 current = current_prices.get(sym, pos.avg_price)
                 loss_pct = (pos.avg_price - current) / pos.avg_price
                 if loss_pct >= stop_loss_pct:
+                    key = ("stop_loss_pct", sym)
+                    current_keys.add(key)
                     violations.append(
                         f"Stop-loss breach: {sym} down {loss_pct:.1%} "
                         f"from buy price. Must sell."
                     )
 
-        self.sebi_violations += len(violations)
+        # Count only newly introduced breaches; persistent breaches are not re-counted.
+        new_violation_events = current_keys - self._active_violation_keys
+        self.sebi_violations += len(new_violation_events)
+        self._active_violation_keys = current_keys
         return violations
 
     # -----------------------------------------------------------------------
@@ -378,15 +426,20 @@ class Portfolio:
 
     def snapshot(self, current_prices: Dict[str, float]) -> Dict:
         """Full portfolio snapshot for logging/debugging."""
+        winning = self.winning_trades_count()
+        losing = self.losing_trades_count()
         return {
             "cash":            round(self.cash, 2),
             "holdings":        self.get_holdings(),
+            "holdings_market_value": self.holdings_market_value(current_prices),
             "total_value":     self.total_value(current_prices),
             "return_pct":      self.return_pct(current_prices),
             "unrealized_pnl":  self.unrealized_pnl(current_prices),
             "realized_pnl":    round(self.total_realized_pnl, 2),
             "total_trades":    len(self.trade_history),
-            "winning_trades":  self.winning_trades_count(),
+            "winning_trades":  winning,
+            "losing_trades":   losing,
+            "closed_trades":   winning + losing,
             "total_brokerage": round(self.total_brokerage, 2),
             "total_stt":       round(self.total_stt, 2),
             "max_drawdown":    self.max_drawdown(),

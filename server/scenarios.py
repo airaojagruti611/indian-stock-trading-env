@@ -40,6 +40,12 @@ NSE_TO_YF = {
     "ULTRACEMCO": "ULTRACEMCO.NS",
 }
 
+# Fallback aliases for symbols that may be renamed/delisted across data vendors.
+# Order matters: first item is preferred.
+NSE_SYMBOL_ALIASES = {
+    "ZOMATO": ["ZOMATO.NS", "ETERNAL.NS"],
+}
+
 # ---------------------------------------------------------------------------
 # Scenario Definitions
 # ---------------------------------------------------------------------------
@@ -178,6 +184,13 @@ class MarketDataFetcher:
         index_data   = self._fetch_index(scenario["benchmark"], start, end)
         trading_days = self._get_trading_days(prices)
 
+        missing_stocks = [stock for stock in stocks if stock not in prices]
+        if missing_stocks:
+            raise RuntimeError(
+                f"Missing market data for required stocks in scenario '{scenario_id}': "
+                f"{missing_stocks}. Refusing partial scenario load."
+            )
+
         if not trading_days:
             raise RuntimeError(
                 f"Failed to fetch market data for scenario '{scenario_id}' "
@@ -188,11 +201,13 @@ class MarketDataFetcher:
         logger.info(f"Using real yfinance data for scenario '{scenario_id}'")
 
         max_steps = scenario["max_steps"]
-        if len(trading_days) > max_steps:
-            step         = len(trading_days) // max_steps
-            sampled_days = trading_days[::step][:max_steps]
-        else:
-            sampled_days = trading_days[:max_steps]
+        anchor_dates = list(scenario.get("crash_dates", []))
+        anchor_dates.extend(list(scenario.get("news_events", {}).keys()))
+        sampled_days = self._sample_trading_days(
+            trading_days=trading_days,
+            max_steps=max_steps,
+            anchor_dates=anchor_dates,
+        )
 
         price_matrix = {}
         for stock in stocks:
@@ -202,6 +217,13 @@ class MarketDataFetcher:
                     if day in prices[stock].index else None
                     for day in sampled_days
                 ]
+
+        # Hard integrity check: every required symbol must exist in price matrix.
+        if sorted(price_matrix.keys()) != sorted(stocks):
+            raise RuntimeError(
+                f"Scenario '{scenario_id}' has inconsistent stock universe. "
+                f"Expected={stocks}, got={sorted(price_matrix.keys())}"
+            )
 
         nifty_series = [
             round(float(index_data.loc[day]), 2)
@@ -228,28 +250,168 @@ class MarketDataFetcher:
                       start: str, end: str) -> Dict[str, pd.Series]:
         prices = {}
         for stock in stocks:
-            yf_sym = NSE_TO_YF.get(stock, stock + ".NS")
-            cache_key = f"{yf_sym}_{start}_{end}"
+            candidates = self._get_symbol_candidates(stock)
+            fetched = False
 
-            if cache_key in self._cache:
-                df = self._cache[cache_key]
-            else:
-                try:
-                    df = yf.download(
-                        yf_sym,
-                        start=start,
-                        end=end,
-                        progress=False,
-                        auto_adjust=True,
-                    )
-                    self._cache[cache_key] = df
-                except Exception as e:
-                    logger.error(f"Failed to fetch {yf_sym}: {e}")
-                    continue
+            for yf_sym in candidates:
+                cache_key = f"{yf_sym}_{start}_{end}"
 
-            if not df.empty:
-                prices[stock] = df["Close"].squeeze()
+                if cache_key in self._cache:
+                    df = self._cache[cache_key]
+                else:
+                    try:
+                        df = yf.download(
+                            yf_sym,
+                            start=start,
+                            end=end,
+                            progress=False,
+                            auto_adjust=True,
+                        )
+                        self._cache[cache_key] = df
+                    except Exception as e:
+                        logger.error(f"Failed to fetch {yf_sym}: {e}")
+                        continue
+
+                close_series = self._extract_close_series(df)
+                if close_series is not None and not close_series.empty:
+                    prices[stock] = close_series
+                    if yf_sym != candidates[0]:
+                        logger.warning(
+                            f"Using fallback Yahoo symbol '{yf_sym}' for stock '{stock}'"
+                        )
+                    fetched = True
+                    break
+
+            if not fetched:
+                logger.error(
+                    f"Could not fetch non-empty market data for stock '{stock}'. "
+                    f"Tried symbols={candidates} from {start} to {end}."
+                )
         return prices
+
+    def _get_symbol_candidates(self, stock: str) -> List[str]:
+        preferred = NSE_TO_YF.get(stock, f"{stock}.NS")
+        aliases = NSE_SYMBOL_ALIASES.get(stock, [])
+        ordered = [preferred] + aliases
+
+        # Keep order while removing duplicates.
+        unique = []
+        seen = set()
+        for sym in ordered:
+            if sym not in seen:
+                seen.add(sym)
+                unique.append(sym)
+        return unique
+
+    def _extract_close_series(self, df: pd.DataFrame) -> Optional[pd.Series]:
+        """Extract a numeric close series from yfinance output safely."""
+        if df is None or df.empty:
+            return None
+
+        close_candidate = None
+        if "Close" in df.columns:
+            close_candidate = df["Close"]
+        elif "Adj Close" in df.columns:
+            close_candidate = df["Adj Close"]
+        else:
+            # yfinance can sometimes return unexpected/multi-index columns.
+            for col in df.columns:
+                col_str = " ".join(str(part) for part in col) if isinstance(col, tuple) else str(col)
+                if "Close" in col_str:
+                    close_candidate = df[col]
+                    break
+
+        if close_candidate is None:
+            return None
+        if isinstance(close_candidate, pd.DataFrame):
+            if close_candidate.empty:
+                return None
+            close_candidate = close_candidate.iloc[:, 0]
+
+        close_series = pd.to_numeric(close_candidate, errors="coerce").dropna()
+        if close_series.empty:
+            return None
+        return close_series.squeeze()
+
+    def _sample_trading_days(
+        self,
+        trading_days: List[pd.Timestamp],
+        max_steps: int,
+        anchor_dates: List[str],
+    ) -> List[pd.Timestamp]:
+        """
+        Sample trading days while preserving critical scenario anchors.
+        Always preserves first/last day and attempts to include crash/news dates.
+        """
+        if len(trading_days) <= max_steps:
+            return trading_days[:max_steps]
+        if max_steps <= 1:
+            return [trading_days[0]]
+
+        def _normalize_ts(ts: pd.Timestamp) -> pd.Timestamp:
+            if ts.tzinfo is not None:
+                return ts.tz_convert(None)
+            return ts
+
+        n = len(trading_days)
+        selected = {0, n - 1}
+        mandatory = {0, n - 1}
+
+        # Include the nearest available trading day for each anchor date.
+        for date_str in anchor_dates:
+            try:
+                ts = _normalize_ts(pd.Timestamp(date_str))
+            except Exception:
+                continue
+            nearest_idx = min(
+                range(n),
+                key=lambda i: abs((_normalize_ts(trading_days[i]) - ts).days),
+            )
+            selected.add(nearest_idx)
+            mandatory.add(nearest_idx)
+
+        # Add evenly spaced points.
+        ideal_indices = [round(i * (n - 1) / (max_steps - 1)) for i in range(max_steps)]
+        for ideal in ideal_indices:
+            if len(selected) >= max_steps:
+                break
+            if ideal in selected:
+                continue
+
+            # Pick nearest unused index around the ideal.
+            delta = 0
+            chosen = None
+            while chosen is None and (ideal - delta >= 0 or ideal + delta < n):
+                for cand in (ideal - delta, ideal + delta):
+                    if 0 <= cand < n and cand not in selected:
+                        chosen = cand
+                        break
+                delta += 1
+            if chosen is not None:
+                selected.add(chosen)
+
+        # If still short, fill with earliest remaining indices.
+        if len(selected) < max_steps:
+            for idx in range(n):
+                if idx not in selected:
+                    selected.add(idx)
+                if len(selected) >= max_steps:
+                    break
+
+        # If too many (due to many anchors), trim non-mandatory farthest from ideals.
+        while len(selected) > max_steps:
+            removable = [idx for idx in selected if idx not in mandatory]
+            if not removable:
+                removable = [idx for idx in selected if idx not in {0, n - 1}]
+            if not removable:
+                break
+            drop_idx = max(
+                removable,
+                key=lambda idx: min(abs(idx - ideal) for ideal in ideal_indices),
+            )
+            selected.remove(drop_idx)
+
+        return [trading_days[idx] for idx in sorted(selected)]
 
     def _fetch_index(self, symbol: str,
                      start: str, end: str) -> pd.Series:

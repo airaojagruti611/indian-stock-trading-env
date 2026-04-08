@@ -1,7 +1,7 @@
 """
 graders.py — Deterministic scoring functions for all 3 tasks.
 
-All graders return a float in [0.0, 1.0].
+All graders return a float in (0.0, 1.0) exclusive.
 Scores are deterministic — same inputs always produce same score.
 
 Easy   → profit vs optimal profit
@@ -11,6 +11,13 @@ Hard   → return + SEBI compliance + risk management + crash behavior
 
 from typing import Dict, List, Optional
 import math
+
+_EPS = 1e-4
+
+
+def _clamp(score: float) -> float:
+    """Clamp score to strictly open interval (0, 1)."""
+    return round(min(1.0 - _EPS, max(_EPS, score)), 4)
 
 
 # ---------------------------------------------------------------------------
@@ -39,15 +46,15 @@ def grade_easy(
     if optimal_return <= 0:
         # Degenerate scenario — just reward not losing money
         if agent_return_pct >= 0:
-            return 0.5
-        return max(0.0, 0.5 + agent_return_pct / 100)
+            return _clamp(0.5)
+        return _clamp(0.5 + agent_return_pct / 100)
 
     if agent_return_pct <= 0:
         # Lost money — small partial credit for trying
-        return max(0.0, 0.05 + agent_return_pct / optimal_return * 0.1)
+        return _clamp(0.05 + agent_return_pct / optimal_return * 0.1)
 
     score = agent_return_pct / optimal_return
-    return round(min(1.0, max(0.0, score)), 4)
+    return _clamp(score)
 
 
 # ---------------------------------------------------------------------------
@@ -77,12 +84,25 @@ def grade_medium(
     # 2. Diversification
     holdings       = portfolio_snapshot.get("holdings", {})
     total_value    = portfolio_snapshot.get("total_value", starting_capital)
-    div_score      = _diversification_score(holdings, total_value, n_stocks=3)
+    holding_values = portfolio_snapshot.get("holdings_market_value", {})
+    div_score      = _diversification_score(
+        holdings=holdings,
+        total_value=total_value,
+        n_stocks=3,
+        holdings_market_value=holding_values,
+    )
 
     # 3. Trade efficiency
     total_trades   = portfolio_snapshot.get("total_trades", 0)
     winning        = portfolio_snapshot.get("winning_trades", 0)
-    efficiency     = _trade_efficiency_score(total_trades, winning)
+    closed_trades  = portfolio_snapshot.get("closed_trades")
+    if closed_trades is None:
+        closed_trades = winning + portfolio_snapshot.get("losing_trades", 0)
+    efficiency     = _trade_efficiency_score(
+        total_trades=total_trades,
+        winning_trades=winning,
+        closed_trades=closed_trades,
+    )
 
     raw_score = (
         0.50 * return_score  +
@@ -92,9 +112,9 @@ def grade_medium(
 
     # SEBI violation penalty
     penalty = min(0.30, sebi_violations * 0.05)
-    final   = max(0.0, raw_score - penalty)
+    final   = raw_score - penalty
 
-    return round(final, 4)
+    return _clamp(final)
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +166,7 @@ def grade_hard(
         0.10 * crash_score
     )
 
-    return round(min(1.0, max(0.0, raw_score)), 4)
+    return _clamp(raw_score)
 
 
 # ---------------------------------------------------------------------------
@@ -162,37 +182,35 @@ def calc_step_reward(
     action_type:         str,
 ) -> float:
     """
-    Dense reward signal at each step.
+    Dense reward signal focused on real value creation.
     Returns small reward in [-0.1, +0.1].
 
-    Components:
-    - Daily P&L normalized       (40%)
-    - SEBI compliance            (30%)
-    - Diversification incentive  (20%)
-    - Action quality             (10%)
+    Design:
+    - No built-in positive baseline.
+    - Primary driver is daily portfolio improvement.
+    - Compliance and overtrading only apply penalties.
+    - Diversification gives only a small bonus, and only when P&L is positive.
     """
-    # 1. Daily P&L — normalize to [-1, 1] then scale
-    pnl_pct     = daily_pnl / starting_capital if starting_capital else 0
-    pnl_score   = max(-1.0, min(1.0, pnl_pct * 100))
+    pnl_pct = daily_pnl / starting_capital if starting_capital else 0.0
+    pnl_score = max(-1.0, min(1.0, pnl_pct * 120.0))
 
-    # 2. Compliance — penalize violations
-    compliance  = 1.0 if sebi_violations_now == 0 else max(0.0, 1.0 - sebi_violations_now * 0.3)
+    # Reward is mostly portfolio change.
+    raw = 0.85 * pnl_score
 
-    # 3. Diversification — reward holding 2+ stocks
-    div         = min(1.0, n_holdings / 2.0)
+    # Small diversification upside only when value actually increased.
+    if pnl_pct > 0 and n_holdings >= 2:
+        raw += min(0.15, (n_holdings - 1) * 0.05)
 
-    # 4. Action quality — penalize excessive trading
-    overtrading = min(1.0, max(0.0, 1.0 - total_trades / 50))
+    # Penalty for rule breaches in current step.
+    raw -= min(1.0, sebi_violations_now * 0.35)
 
-    raw = (
-        0.40 * pnl_score   +
-        0.30 * compliance  +
-        0.20 * div         +
-        0.10 * overtrading
-    )
+    # Action-aware overtrading penalty.
+    atype = (action_type or "hold").lower().strip()
+    if atype in {"buy", "sell"}:
+        raw -= min(0.20, max(0, total_trades - 12) * 0.01)
 
-    # Scale to small range so step rewards don't dominate final score
-    return round(raw * 0.1, 6)
+    # Scale to small range so step rewards don't dominate final score.
+    return round(max(-0.1, min(0.1, raw * 0.1)), 6)
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +282,7 @@ def _diversification_score(
     holdings:    Dict[str, int],
     total_value: float,
     n_stocks:    int,
+    holdings_market_value: Optional[Dict[str, float]] = None,
 ) -> float:
     """
     Score based on how well diversified the portfolio is.
@@ -274,37 +293,51 @@ def _diversification_score(
     if not holdings:
         return 0.0
     n_held = len(holdings)
-    if n_held == 0:
-        return 0.0
-    coverage = min(1.0, n_held / n_stocks)
+    coverage = min(1.0, n_held / max(1, n_stocks))
 
-    # Herfindahl-Hirschman Index (concentration)
-    # Lower = more diversified
-    if total_value > 0:
-        weights = []
-        for sym, qty in holdings.items():
-            # Approximate weight (without live prices, use equal weight)
-            weights.append(1.0 / n_held)
-        hhi = sum(w ** 2 for w in weights)
-        concentration_penalty = max(0.0, hhi - 1.0 / n_stocks)
-        div_quality = max(0.0, 1.0 - concentration_penalty * n_stocks)
-    else:
+    # Herfindahl-Hirschman concentration using actual position values when available.
+    values = {}
+    if holdings_market_value:
+        values = {sym: max(0.0, float(v)) for sym, v in holdings_market_value.items()}
+    elif holdings:
+        values = {sym: float(max(0, qty)) for sym, qty in holdings.items()}
+
+    value_sum = sum(values.values())
+    if total_value <= 0 or value_sum <= 0:
         div_quality = 0.0
+    else:
+        weights = [v / value_sum for v in values.values() if v > 0]
+        hhi = sum(w ** 2 for w in weights)
+        # Normalize HHI between ideal diversification and full concentration.
+        ideal_hhi = 1.0 / max(1, min(n_stocks, len(weights)))
+        if 1.0 - ideal_hhi <= 1e-9:
+            div_quality = 1.0
+        else:
+            concentration = (hhi - ideal_hhi) / (1.0 - ideal_hhi)
+            div_quality = max(0.0, min(1.0, 1.0 - concentration))
 
     return round(0.6 * coverage + 0.4 * div_quality, 4)
 
 
-def _trade_efficiency_score(total_trades: int, winning_trades: int) -> float:
+def _trade_efficiency_score(
+    total_trades: int,
+    winning_trades: int,
+    closed_trades: Optional[int] = None,
+) -> float:
     """
     Score based on trade win rate and avoiding overtrading.
     """
     if total_trades == 0:
         return 0.2  # Did nothing — small penalty
 
-    win_rate       = winning_trades / total_trades
+    closed = closed_trades if closed_trades is not None else total_trades
+    if closed <= 0:
+        win_rate = 0.2
+    else:
+        win_rate = min(1.0, max(0.0, winning_trades / closed))
     overtrading_ok = min(1.0, max(0.0, 1.0 - total_trades / 20))
 
-    return round(0.7 * win_rate + 0.3 * overtrading_ok, 4)
+    return round(0.75 * win_rate + 0.25 * overtrading_ok, 4)
 
 
 def _compliance_score(sebi_violations: int) -> float:

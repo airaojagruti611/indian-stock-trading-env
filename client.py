@@ -62,6 +62,7 @@ class IndianStockEnv(EnvClient[IndianTradingAction, MarketObservation, Portfolio
 
             current_day=obs_data.get("current_day", 1),
             total_days=obs_data.get("total_days", 5),
+            current_date=obs_data.get("current_date", ""),
             task_id=obs_data.get("task_id", "easy"),
             task_name=obs_data.get("task_name", ""),
 

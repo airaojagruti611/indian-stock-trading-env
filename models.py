@@ -91,6 +91,7 @@ class MarketObservation(Observation):
     # Episode progress
     current_day: int  = Field(default=1)
     total_days: int   = Field(default=5)
+    current_date: str = Field(default="", description="Current trading date (YYYY-MM-DD).")
     task_id: str      = Field(default="easy")
     task_name: str    = Field(default="")
 

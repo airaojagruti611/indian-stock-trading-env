@@ -11,21 +11,28 @@ Uses real NSE historical data via yfinance.
 
 import uuid
 import logging
+import os
+import sys
 from typing import Dict, List, Optional
 
 from openenv.core.env_server import Environment
 
-# Import from sibling modules
-from .scenarios   import get_scenario, get_scenario_config, SCENARIOS
-from .portfolio   import Portfolio
-from .graders     import (
-    grade_easy, grade_medium, grade_hard, calc_step_reward
-)
+try:
+    # Package-style imports (uvicorn server.app:app)
+    from .scenarios import get_scenario, get_scenario_config, SCENARIOS
+    from .portfolio import Portfolio
+    from .graders import grade_easy, grade_medium, grade_hard, calc_step_reward
+except ImportError:
+    # Flat-file fallback (python app.py in same directory)
+    from scenarios import get_scenario, get_scenario_config, SCENARIOS
+    from portfolio import Portfolio
+    from graders import grade_easy, grade_medium, grade_hard, calc_step_reward
 
-# Import models from parent package
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from models import IndianTradingAction, MarketObservation, PortfolioState
+try:
+    from models import IndianTradingAction, MarketObservation, PortfolioState
+except ImportError:
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from models import IndianTradingAction, MarketObservation, PortfolioState
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +105,8 @@ class IndianStockEnvironment(Environment):
 
         self._current_step = 0
         self._done         = False
-        self._daily_values = [starting_capital]
+        self._portfolio.record_daily_value(starting_capital)
+        self._daily_values = self._portfolio.daily_values
         self._crash_hit    = []
         self._prev_value   = starting_capital
 
@@ -180,7 +188,7 @@ class IndianStockEnvironment(Environment):
 
         # Calculate portfolio value
         portfolio_value = self._portfolio.total_value(current_prices)
-        self._daily_values.append(portfolio_value)
+        self._portfolio.record_daily_value(portfolio_value)
 
         # Track crash behavior (was agent hedged on crash days?)
         crash_dates = self._scenario_data.get("crash_dates", [])
@@ -194,7 +202,7 @@ class IndianStockEnvironment(Environment):
             daily_pnl=daily_pnl,
             starting_capital=config["starting_capital"],
             sebi_violations_now=len(sebi_warnings),
-            n_holdings=len(self._portfolio.get_holdings()),
+            n_holdings=len(self._portfolio.holdings_market_value(current_prices)),
             total_trades=len(self._portfolio.trade_history),
             action_type=action.action_type,
         )
@@ -349,7 +357,7 @@ class IndianStockEnvironment(Environment):
                 nifty_series=nifty_series,
                 starting_capital=config["starting_capital"],
                 sebi_violations=snapshot.get("sebi_violations", 0),
-                daily_values=self._daily_values,
+                daily_values=self._portfolio.daily_values,
                 crash_dates_hit=self._crash_hit,
             )
 
@@ -406,6 +414,7 @@ class IndianStockEnvironment(Environment):
         return MarketObservation(
             done=done,
             reward=reward,
+            current_date=date_str,
             current_prices=prices,
             price_history=history,
             price_change_pct=change_pct,
